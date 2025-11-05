@@ -2,6 +2,7 @@ package com.example.facerec
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import kotlin.math.sqrt
@@ -70,7 +71,9 @@ class FaceRecognizer(context: Context, modelFilename: String = "facenet.tflite")
         if (norm != 0f) {
             for (i in emb.indices) emb[i] /= norm
         }
+
         return emb
+
     }
 
     /** Convert embedding to JSON string for saving

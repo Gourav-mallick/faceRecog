@@ -1,7 +1,8 @@
 package com.example.facerec
 
 import android.os.Bundle
-import android.widget.TextView
+import android.widget.ArrayAdapter
+import android.widget.ListView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.facerec.data.AppDatabase
@@ -11,33 +12,24 @@ import kotlinx.coroutines.withContext
 
 class PersonListActivity : AppCompatActivity() {
 
+    private lateinit var listView: ListView
     private lateinit var db: AppDatabase
-    private lateinit var textView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_person_list)
+        listView = ListView(this)
+        setContentView(listView)
 
         db = AppDatabase.getInstance(this)
-        textView = findViewById(R.id.tv_persons)
 
         lifecycleScope.launch {
-            val persons = withContext(Dispatchers.IO) {
-                db.personDao().getAll()
+            val persons = withContext(Dispatchers.IO) { db.personDao().getAll() }
+            val display = persons.map { p ->
+                val emb = if (p.embeddingJson.isNullOrEmpty()) "no-emb" else "emb"
+                val photo = if (p.photoPath.isNullOrEmpty()) "no-photo" else "photo"
+                "ID:${p.studentId}  ${p.studentName}  [$photo/$emb]"
             }
-
-            if (persons.isEmpty()) {
-                textView.text = "No enrolled persons found."
-            } else {
-                val displayText = buildString {
-                    persons.forEachIndexed { index, person ->
-                        append("Person #${index + 1}\n")
-                        append("Name: ${person.name}\n")
-                        append("Photo: ${person.photoPath}\n")
-                    }
-                }
-                textView.text = displayText
-            }
+            listView.adapter = ArrayAdapter(this@PersonListActivity, android.R.layout.simple_list_item_1, display)
         }
     }
 }

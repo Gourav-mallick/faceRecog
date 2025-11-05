@@ -35,6 +35,7 @@ class RecognitionActivity : AppCompatActivity() {
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
         .enableTracking()
         .build()
+
     private val detector = FaceDetection.getClient(detectorOptions)
 
     private var lastDetectionTime = 0L
@@ -60,7 +61,7 @@ class RecognitionActivity : AppCompatActivity() {
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
+        cameraProviderFuture.addListener(Runnable {
             val cameraProvider = cameraProviderFuture.get()
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
@@ -118,11 +119,11 @@ class RecognitionActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val persons = withContext(Dispatchers.IO) { db.personDao().getAll() }
             if (persons.isEmpty()) {
-                resultText.text = "Not enrolled persons"
+                resultText.text = "⚠️ No enrolled users found"
                 return@launch
             }
 
-            // ✅ flip horizontally for front cam
+            // ✅ Flip horizontally for front camera
             val matrix = Matrix().apply { preScale(-1f, 1f) }
             val flippedFace = Bitmap.createBitmap(faceBmp, 0, 0, faceBmp.width, faceBmp.height, matrix, true)
 
@@ -131,7 +132,10 @@ class RecognitionActivity : AppCompatActivity() {
             var minDistance = Float.MAX_VALUE
 
             for (p in persons) {
-                val emb = recognizer.jsonToEmbedding(p.embeddingJson)
+                // ✅ Skip users without embeddings or photos
+                if (p.embeddingJson.isNullOrEmpty() || p.photoPath.isNullOrEmpty()) continue
+
+                val emb = recognizer.jsonToEmbedding(p.embeddingJson!!)
                 val dist = recognizer.compareEmbeddings(newEmbedding, emb)
                 if (dist < minDistance) {
                     minDistance = dist
@@ -140,9 +144,9 @@ class RecognitionActivity : AppCompatActivity() {
             }
 
             withContext(Dispatchers.Main) {
-                if (minDistance < 1.0f) {
-                    resultText.text = "✅ Recognized: ${bestMatch?.name}\nDist=${"%.3f".format(minDistance)}"
-                    lastRecognizedName = bestMatch?.name ?: ""
+                if (bestMatch != null && minDistance < 1.0f) {
+                    resultText.text = "✅ Recognized: ${bestMatch.studentName} (ID: ${bestMatch.studentId})\nDist=${"%.3f".format(minDistance)}"
+                    lastRecognizedName = bestMatch.studentName
                 } else {
                     resultText.text = "❌ Not enrolled\nDist=${"%.3f".format(minDistance)}"
                     lastRecognizedName = ""

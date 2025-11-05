@@ -47,7 +47,9 @@ class EnrollmentActivity : AppCompatActivity() {
     private var isCapturing = false
     private var capturedEmbeddings = mutableListOf<FloatArray>()
     private var lastCaptureTime = 0L
-    private var currentName = ""
+
+    private var currentStudentId = ""
+    private var currentStudentName = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,12 +66,55 @@ class EnrollmentActivity : AppCompatActivity() {
         recognizeBtn = findViewById(R.id.btn_open_recognition)
 
         startBtn.setOnClickListener { startEnrollment() }
+
         viewAllBtn.setOnClickListener {
             startActivity(android.content.Intent(this, PersonListActivity::class.java))
         }
         recognizeBtn.setOnClickListener {
             startActivity(android.content.Intent(this, RecognitionActivity::class.java))
         }
+
+        lifecycleScope.launch {
+            val persons = db.personDao().getAll()
+            if (persons.isEmpty()) {
+                val defaultPeople = listOf(
+                    Person(
+                        studentId = "1",
+                        studentName = "Gourav",
+                        photoPath = null,
+                        embeddingJson = null,
+                        present = true
+                    ),
+                    Person(
+                        studentId = "2",
+                        studentName = "Priya",
+                        photoPath = null,
+                        embeddingJson = null,
+                        present = false
+                    ),
+                    Person(
+                        studentId = "3",
+                        studentName = "Rahul",
+                        photoPath = null,
+                        embeddingJson = null,
+                        present = false
+                    ),
+                    Person(
+                        studentId = "4",
+                        studentName = "Aditi",
+                        photoPath = null,
+                        embeddingJson = null,
+                        present = false
+                    )
+                )
+
+                // Insert all at once
+                defaultPeople.forEach { db.personDao().insert(it) }
+
+                Toast.makeText(this@EnrollmentActivity, "Default persons added", Toast.LENGTH_SHORT).show()
+            }
+        }
+
 
         if (allPermissionsGranted()) startCamera()
         else ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
@@ -81,27 +126,26 @@ class EnrollmentActivity : AppCompatActivity() {
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
+        // Use explicit Runnable to avoid "Cannot infer type for this parameter" errors
+        cameraProviderFuture.addListener(Runnable {
             val cameraProvider = cameraProviderFuture.get()
 
             val preview = Preview.Builder()
                 .setTargetRotation(previewView.display.rotation)
                 .build()
-
             preview.setSurfaceProvider(previewView.surfaceProvider)
 
             val analyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-                .also {
-                    // Run analysis on background thread
-                    it.setAnalyzer(Executors.newSingleThreadExecutor(), FaceAnalyzer())
-                }
+
+            // Use a single-thread executor and pass it explicitly as an Executor
+            val analysisExecutor = Executors.newSingleThreadExecutor()
+            analyzer.setAnalyzer(analysisExecutor, FaceAnalyzer())
 
             try {
                 cameraProvider.unbindAll()
-
-                // Delay binding slightly to ensure surface is ready
+                // bind on UI thread once the preview is ready
                 previewView.post {
                     cameraProvider.bindToLifecycle(
                         this,
@@ -110,7 +154,6 @@ class EnrollmentActivity : AppCompatActivity() {
                         analyzer
                     )
                 }
-
             } catch (exc: Exception) {
                 Log.e("CameraX", "Camera binding failed: ${exc.message}")
                 Toast.makeText(this, "Camera failed to start", Toast.LENGTH_SHORT).show()
@@ -120,16 +163,36 @@ class EnrollmentActivity : AppCompatActivity() {
 
 
     private fun startEnrollment() {
-        currentName = nameInput.text.toString().trim()
-        if (currentName.isEmpty()) {
-            Toast.makeText(this, "Please enter a name first!", Toast.LENGTH_SHORT).show()
+        val inputText = nameInput.text.toString().trim()
+        if (inputText.isEmpty()) {
+            Toast.makeText(this, "Enter ID or Name", Toast.LENGTH_SHORT).show()
             return
         }
 
-        capturedEmbeddings.clear()
-        isCapturing = true
-        statusText.text = "Capturing face data..."
-        Toast.makeText(this, "Keep your face steady for 3 samples", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val results = db.personDao().searchPerson("%$inputText%")
+
+            if (results.isEmpty()) {
+                Toast.makeText(this@EnrollmentActivity, "No user found!", Toast.LENGTH_SHORT).show()
+                statusText.text = "No matching user"
+                return@launch
+            }
+
+            val person = results.first()
+            currentStudentId = person.studentId
+            currentStudentName = person.studentName
+
+            if (!person.photoPath.isNullOrEmpty()) {
+                Toast.makeText(this@EnrollmentActivity, "User already enrolled", Toast.LENGTH_SHORT).show()
+                statusText.text = "Already enrolled"
+                return@launch
+            }
+
+            capturedEmbeddings.clear()
+            isCapturing = true
+            statusText.text = "Capturing face data..."
+            Toast.makeText(this@EnrollmentActivity, "Keep face steady for 3 samples", Toast.LENGTH_SHORT).show()
+        }
     }
 
     inner class FaceAnalyzer : ImageAnalysis.Analyzer {
@@ -163,7 +226,10 @@ class EnrollmentActivity : AppCompatActivity() {
                             val flippedFace = Bitmap.createBitmap(faceBmp, 0, 0, faceBmp.width, faceBmp.height, matrix, true)
 
                             val emb = recognizer.getEmbedding(flippedFace)
+                            Log.d("FaceAnalyzer", "Embedding: ${emb.joinToString(", ")}")
+                            Log.d("FaceAnalyzer", "Embedding size: ${emb.size}")
                             capturedEmbeddings.add(emb)
+
                             runOnUiThread {
                                 statusText.text = "Captured: ${capturedEmbeddings.size}/3"
                             }
@@ -181,6 +247,7 @@ class EnrollmentActivity : AppCompatActivity() {
 
     private fun saveEnrollment() {
         lifecycleScope.launch {
+            // Average captured embeddings
             val avg = FloatArray(capturedEmbeddings[0].size)
             for (emb in capturedEmbeddings)
                 for (i in emb.indices) avg[i] += emb[i]
@@ -190,66 +257,65 @@ class EnrollmentActivity : AppCompatActivity() {
             val allPersons = db.personDao().getAll()
 
             var matchedPerson: Person? = null
-            var matchedEmb: FloatArray? = null
             var highestSim = 0f
+            var lowestDist = Float.MAX_VALUE
 
-            // Compare new face embedding with all existing ones
+            // ✅ Compare with all existing enrolled faces
             for (p in allPersons) {
-                val storedEmb = recognizer.jsonToEmbedding(p.embeddingJson)
+                if (p.embeddingJson.isNullOrEmpty()) continue
+                val storedEmb = recognizer.jsonToEmbedding(p.embeddingJson!!)
                 val sim = FaceRecognizer.cosineSimilarity(avg, storedEmb)
+                val dist = recognizer.compareEmbeddings(avg, storedEmb)
+
+                // Track both similarity and distance
                 if (sim > highestSim) {
                     highestSim = sim
                     matchedPerson = p
-                    matchedEmb = storedEmb
                 }
+                if (dist < lowestDist) lowestDist = dist
             }
 
-            // More stable same-face detection (threshold 0.80)
-            // Adaptive thresholding for more stable matching
-            if (matchedPerson != null) {
-                val confirmSim = FaceRecognizer.cosineSimilarity(avg, recognizer.jsonToEmbedding(matchedPerson!!.embeddingJson))
+            // ✅ Same-face detection thresholds (tunable)
+            val isSameFace = (highestSim > 0.80f && lowestDist < 1.05f)
 
-                // Tiered logic
-                if (highestSim > 0.82f || (highestSim > 0.75f && confirmSim > 0.78f)) {
-                    withContext(Dispatchers.Main) {
-                        if (matchedPerson!!.name != currentName) {
-                            Toast.makeText(
-                                this@EnrollmentActivity,
-                                " Face already enrolled as ${matchedPerson!!.name}",
-                                Toast.LENGTH_LONG
-                            ).show()
-                            statusText.text = "Duplicate face detected"
-                        } else {
-                            Toast.makeText(
-                                this@EnrollmentActivity,
-                                "This person ($currentName) is already enrolled.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                            statusText.text = "Already enrolled"
-                        }
+            if (matchedPerson != null && isSameFace) {
+                withContext(Dispatchers.Main) {
+                    if (matchedPerson.studentId != currentStudentId) {
+                        Toast.makeText(
+                            this@EnrollmentActivity,
+                            "⚠️ Face already enrolled as ${matchedPerson.studentName}. You are not ${currentStudentName}.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        statusText.text = "Duplicate face detected (${matchedPerson.studentName})"
+                    } else {
+                        Toast.makeText(
+                            this@EnrollmentActivity,
+                            "This person (${currentStudentName}) is already enrolled.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        statusText.text = "Already enrolled"
                     }
-                    return@launch
                 }
+                return@launch
             }
 
-
-            // Save new enrollment
+            // ✅ If no match found, proceed to new enrollment
             val photoPath = saveBitmapToInternal(
                 previewView.bitmap!!,
                 "photo_${System.currentTimeMillis()}.jpg"
             )
-            db.personDao().insert(
-                Person(
-                    name = currentName,
-                    photoPath = photoPath,
-                    embeddingJson = embJson
-                )
-            )
+            db.personDao().updateEnrollment(currentStudentId, photoPath, embJson)
+
+
+            //just for log updated Data
+            val allData=db.personDao().getAll()
+            Log.d("EnrollmentActivity", "Enrollment saved for $allData")
+
 
             withContext(Dispatchers.Main) {
                 Toast.makeText(
                     this@EnrollmentActivity,
-                    "✅ Enrollment saved for $currentName",
+                    "✅ Enrollment saved for $currentStudentName",
                     Toast.LENGTH_SHORT
                 ).show()
                 nameInput.text.clear()
@@ -257,6 +323,7 @@ class EnrollmentActivity : AppCompatActivity() {
             }
         }
     }
+
 
     private fun saveBitmapToInternal(bmp: Bitmap, filename: String): String {
         val file = File(filesDir, filename)
